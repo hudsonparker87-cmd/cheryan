@@ -1,0 +1,7 @@
+{
+  "name": "Ekram Management System",
+  "description": "A comprehensive system for managing charity events, donations, and live donor displays with a modern Persian interface.",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}
