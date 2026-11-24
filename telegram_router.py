@@ -1701,6 +1701,8 @@ user_app = TelegramClient(
 user_app.parse_mode = 'md'
 # کلاینت ربات مدیریت
 bot_app = TelegramClient("admin_bot", TELEGRAM_API_ID, TELEGRAM_API_HASH)
+# پین‌کردن اتصال ربات روی دیتاسنتر ۴ (هم‌مسیر با سشن کاربر) — آزمایش ۲۰۲۶-۱۱-۲۴
+bot_app.session.set_dc(4, "149.154.167.91", 443)
 bot_app.parse_mode = 'md'
 
 admin_states = {}
