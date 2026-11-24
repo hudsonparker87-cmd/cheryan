@@ -244,6 +244,8 @@ def flush_all_to_db():
 # اول چک می‌کند اجرای دیگری در صف یا در حال اجرا نباشد تا اجرای تکراری
 # ساخته نشود — مثلاً وقتی لغو به‌خاطر cron بوده و اجرای بعدی از قبل هست.
 def _dispatch_next_run():
+    # Self-dispatch disabled: runs are started externally on a fixed schedule.
+    return
     try:
         from datetime import datetime, timezone, timedelta
         _tn = datetime.now(timezone(timedelta(hours=3, minutes=30)))
