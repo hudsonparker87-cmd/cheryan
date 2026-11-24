@@ -13,6 +13,8 @@ import subprocess
 import signal
 import atexit
 import threading
+import shutil
+import html
 
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
@@ -40,83 +42,21 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY_ROUTER", "").strip()
 DATABASE_URL = os.environ.get("ROUTER_DATABASE_URL", "").strip()
 
 DIRECT_PROXY = {"http": None, "https": None}
-VLESS_PROXY_URL = "http://127.0.0.1:10809"
-VLESS_PROXY = {"http": VLESS_PROXY_URL, "https": VLESS_PROXY_URL}
-
-def _rewind_files_arg(files_arg):
-    if not files_arg or not isinstance(files_arg, dict):
-        return
-    for val in files_arg.values():
-        f_obj = val[1] if isinstance(val, (tuple, list)) and len(val) > 1 else val
-        if hasattr(f_obj, "seek"):
-            try:
-                f_obj.seek(0)
-            except Exception:
-                pass
 
 def _rubika_post(url, **kwargs):
-    """اولویت روبیکا: ۱. پروکسی VLESS -> ۲. در صورت خطا، اتصال مستقیم"""
+    """ارسال مستقیم درخواست به روبیکا (بدون پروکسی)"""
     kwargs.pop("proxies", None)
-    last_exc = None
-    for idx, (px, px_name) in enumerate([(VLESS_PROXY, "پروکسی VLESS"), (DIRECT_PROXY, "اتصال مستقیم")]):
-        if idx > 0:
-            _rewind_files_arg(kwargs.get("files"))
-        try:
-            res = requests.post(url, proxies=px, **kwargs)
-            if res.status_code < 500:
-                try:
-                    res.json()
-                    return res
-                except Exception:
-                    if idx == 0:
-                        print(f"⚠️ پاسخ غیر JSON از روبیکا با {px_name}؛ تلاش با مسیر جایگزین (مستقیم)...", flush=True)
-                        continue
-                    return res
-            if idx == 0:
-                print(f"⚠️ خطای HTTP {res.status_code} در روبیکا با {px_name}؛ تلاش با مسیر جایگزین (مستقیم)...", flush=True)
-                continue
-            return res
-        except Exception as e:
-            last_exc = e
-            if idx == 0:
-                print(f"⚠️ خطا در ارتباط با روبیکا از طریق {px_name} ({e})؛ تلاش با اتصال مستقیم...", flush=True)
-    raise last_exc
+    return requests.post(url, proxies=DIRECT_PROXY, **kwargs)
 
 def _bale_eitaa_post(url, **kwargs):
-    """اولویت بله و ایتا: ۱. اتصال مستقیم -> ۲. در صورت خطا، پروکسی VLESS به عنوان جایگزین"""
+    """ارسال مستقیم درخواست به بله و ایتا (بدون پروکسی)"""
     kwargs.pop("proxies", None)
-    last_exc = None
-    for idx, (px, px_name) in enumerate([(DIRECT_PROXY, "اتصال مستقیم"), (VLESS_PROXY, "پروکسی جایگزین VLESS")]):
-        if idx > 0:
-            _rewind_files_arg(kwargs.get("files"))
-        try:
-            res = requests.post(url, proxies=px, **kwargs)
-            if res.status_code < 500:
-                return res
-            if idx == 0:
-                print(f"⚠️ خطای HTTP {res.status_code} در {px_name}؛ تلاش با پروکسی جایگزین VLESS...", flush=True)
-                continue
-            return res
-        except Exception as e:
-            last_exc = e
-            if idx == 0:
-                print(f"⚠️ خطا در {px_name} ({e})؛ تلاش با پروکسی جایگزین VLESS...", flush=True)
-    raise last_exc
+    return requests.post(url, proxies=DIRECT_PROXY, **kwargs)
 
 def _bale_eitaa_get(url, **kwargs):
-    """دریافت آپدیت‌های بله: ۱. اتصال مستقیم -> ۲. در صورت خطا، پروکسی VLESS"""
+    """دریافت مستقیم آپدیت‌های بله (بدون پروکسی)"""
     kwargs.pop("proxies", None)
-    last_exc = None
-    for idx, (px, px_name) in enumerate([(DIRECT_PROXY, "اتصال مستقیم"), (VLESS_PROXY, "پروکسی جایگزین VLESS")]):
-        try:
-            res = requests.get(url, proxies=px, **kwargs)
-            if res.status_code < 500:
-                return res
-        except Exception as e:
-            last_exc = e
-    if last_exc:
-        raise last_exc
-    return res
+    return requests.get(url, proxies=DIRECT_PROXY, **kwargs)
 
 # ==========================================
 # سیستم جامع مدیریت Cache در رم (صفر کردن درگیری دیتابیس در طول اجرا)
@@ -878,7 +818,7 @@ def send_single_media_to_bale(caption, channel_id, file_path, file_name, media_t
             # فایل درون حلقه باز می‌شود تا در صورت خطا، مجدداً از ابتدا خوانده شود
             with open(file_path, 'rb') as f:
                 files = {file_key: (file_name, f, mime_type)}
-                res = _bale_eitaa_post(url, data={'chat_id': channel_id, 'caption': caption}, files=files, proxies=DIRECT_PROXY, timeout=(15, 60))
+                res = _bale_eitaa_post(url, data={'chat_id': channel_id, 'caption': caption}, files=files, proxies=DIRECT_PROXY, timeout=(30, 600))
                 
                 if res.status_code == 200:
                     print(f"✅ تک‌فایل با موفقیت به بله ({channel_id}) ارسال شد.", flush=True)
@@ -933,7 +873,7 @@ def send_album_to_bale(caption, channel_id, files_list):
                 # برگرداندن نشانگرِ خواندن تمام فایل‌ها به نقطه صفر پیش از هر تلاش
                 for f in opened_files: f.seek(0)
                 
-                res = _bale_eitaa_post(f"https://tapi.bale.ai/bot{BALE_TOKEN}/sendMediaGroup", data={"chat_id": channel_id, "media": json.dumps(media_json)}, files=files_dict, proxies=DIRECT_PROXY, timeout=(15, 120))
+                res = _bale_eitaa_post(f"https://tapi.bale.ai/bot{BALE_TOKEN}/sendMediaGroup", data={"chat_id": channel_id, "media": json.dumps(media_json)}, files=files_dict, proxies=DIRECT_PROXY, timeout=(30, 600))
                 
                 if res.status_code == 200:
                     print(f"✅ آلبوم با موفقیت به بله ({channel_id}) ارسال شد.", flush=True)
@@ -1113,33 +1053,55 @@ def send_text_to_rubika(text, channel_id, reply_to_message_id=None):
 # =======================================================================
 
 def format_text_for_eitaa(text):
-    """تبدیل تگ‌های HTML تلگرام به استایل مارک‌داون استاندارد و لینک‌های ایتا"""
+    """تبدیل تگ‌های HTML و لینک‌های مارک‌داون به فرمت خوانا و سازگار با API کانال ایتایار"""
     if not text: return ""
     text = str(text)
-    
-    # ۱. تبدیل هایپرلینک‌های HTML: <a href="url">text</a> -> [text](url)
+
+    def _normalize_url(u):
+        u = u.strip()
+        if not u:
+            return ""
+        if not re.match(r'^(?:https?://|tg://|mailto:)', u, flags=re.IGNORECASE):
+            if '.' in u and not re.search(r'\s', u):
+                u = f"https://{u}"
+        return u
+
+    def _format_link(link_text, href):
+        href_clean = _normalize_url(href)
+        label_clean = re.sub(r'</?[a-zA-Z][^>]*>', '', link_text).strip()
+        if not label_clean or label_clean.lower() == href_clean.lower() or f"https://{label_clean}".lower() == href_clean.lower():
+            return href_clean
+        return f"{label_clean}: {href_clean}"
+
+    # ۱. تبدیل هایپرلینک‌های HTML: <a href="url">text</a> -> text: https://url
     def repl_a(m):
-        href = m.group(1).strip()
-        link_text = m.group(2).strip() or href
-        return f"[{link_text}]({href})"
+        return _format_link(m.group(2), m.group(1))
     text = re.sub(r'<a\s+(?:[^>]*?\s+)?href=["\'](.*?)["\'][^>]*>(.*?)</a>', repl_a, text, flags=re.DOTALL | re.IGNORECASE)
-    
-    # ۲. تبدیل بولد HTML: <b>...</b> و <strong>...</strong> -> **...**
+
+    # ۲. تبدیل هایپرلینک‌های مارک‌داون: [text](url) -> text: https://url
+    def repl_md_link(m):
+        return _format_link(m.group(1), m.group(2))
+    text = re.sub(r'\[([^\[\]]+)\]\(([^()\s]+)\)', repl_md_link, text)
+
+    # ۳. تبدیل بولد HTML: <b>...</b> و <strong>...</strong> -> **...**
     text = re.sub(r'<(?:b|strong)[^>]*>(.*?)</(?:b|strong)>', r'**\1**', text, flags=re.DOTALL | re.IGNORECASE)
-    
-    # ۳. تبدیل ایتالیک HTML: <i>...</i> و <em>...</em> -> __...__
+
+    # ۴. تبدیل ایتالیک HTML: <i>...</i> و <em>...</em> -> __...__
     text = re.sub(r'<(?:i|em)[^>]*>(.*?)</(?:i|em)>', r'__\1__', text, flags=re.DOTALL | re.IGNORECASE)
-    
-    # ۴. تبدیل کد و پیش‌فرمت HTML: <code>...</code> -> `...` و <pre>...</pre> -> ```...```
+
+    # ۵. تبدیل کد و پیش‌فرمت HTML: <code>...</code> -> `...` و <pre>...</pre> -> ```...```
     text = re.sub(r'<pre[^>]*>(.*?)</pre>', r'```\n\1\n```', text, flags=re.DOTALL | re.IGNORECASE)
     text = re.sub(r'<code[^>]*>(.*?)</code>', r'`\1`', text, flags=re.DOTALL | re.IGNORECASE)
-    
-    # ۵. تبدیل خط جدید HTML
+
+    # ۶. تبدیل خط جدید HTML
     text = re.sub(r'<br\s*/?>', '\n', text, flags=re.IGNORECASE)
-    
-    # ۶. حذف سایر تگ‌های HTML باقیمانده بدون تغییر محتوا (مانند <u>, <s>, <span> و غیره)
+
+    # ۷. حذف سایر تگ‌های HTML باقیمانده بدون تغییر محتوا (مانند <u>, <s>, <span> و غیره)
     text = re.sub(r'</?[a-zA-Z][^>]*>', '', text)
-    
+
+    # ۸. تبدیل موجودیت‌های HTML (مانند &amp; و &quot;)
+    text = html.unescape(text)
+
     return text.strip()
 
 def extract_inline_button_links(message):
@@ -1246,6 +1208,7 @@ def clean_eitaa_channel(c_id):
     c_id = re.sub(r'^https?://(?:www\.)?eitaa\.com/', '', c_id, flags=re.IGNORECASE)
     c_id = re.sub(r'^eitaa\.com/', '', c_id, flags=re.IGNORECASE)
     c_id = c_id.lstrip('@').strip()
+    c_id = c_id.split('/')[0].split('?')[0].strip()
     c_id = re.sub(r'[^a-zA-Z0-9_\-]', '', c_id)
     return c_id
 
@@ -1278,7 +1241,7 @@ async def notify_admin_all_platforms(text):
 
 def send_text_to_eitaa(text, channel_id):
     """ارسال متن ساده به کانال ایتا"""
-    if not EITAA_TOKEN: return True, "توکن ایتا تنظیم نشده"
+    if not EITAA_TOKEN: return True, ""
     channel_id = clean_eitaa_channel(channel_id)
     if not channel_id: return False, "شناسه کانال ایتا خالی است"
     
@@ -1313,7 +1276,7 @@ def send_text_to_eitaa(text, channel_id):
                 if attempt < 3: time.sleep(3)
                 else: return False, err_msg
         except Exception as e:
-            err_msg = f"استثنا در ارتباط با ایتا: {e}"
+            err_msg = f"استثنا در ارتباط با ایتا: {str(e).replace(token, '***')}"
             print(f" ❌ {err_msg}", flush=True)
             if attempt < 3: time.sleep(3)
             else: return False, err_msg
@@ -1322,30 +1285,56 @@ def send_text_to_eitaa(text, channel_id):
 
 def process_eitaa_media(caption, channel_id, file_path, file_name, media_type='photo'):
     """ارسال فایل مدیا به ایتا با متد sendFile"""
-    if not EITAA_TOKEN: return True, "توکن ایتا تنظیم نشده"
+    if not EITAA_TOKEN: return True, ""
     channel_id = clean_eitaa_channel(channel_id)
     if not channel_id: return False, "شناسه کانال ایتا خالی است"
+    if not file_path or not os.path.exists(file_path):
+        return False, "فایل مورد نظر روی دیسک یافت نشد"
+    if os.path.getsize(file_path) <= 0:
+        return False, "فایل مورد نظر خالی (۰ بایت) است"
+
     caption = format_text_for_eitaa(caption) if caption else ""
-    
-    # برای گیف طبق مستندات ایتایار پسوند باید .gif باشد
-    if media_type == 'gif' and not file_name.lower().endswith('.gif'):
-        file_name = os.path.splitext(file_name)[0] + '.gif'
-        
+
+    orig_title = str(file_name or "").strip()
+    ext = os.path.splitext(orig_title)[1].lower()
+    if not ext or not re.match(r'^\.[a-z0-9]{1,8}$', ext):
+        ext = os.path.splitext(file_path)[1].lower()
+    if not ext or not re.match(r'^\.[a-z0-9]{1,8}$', ext):
+        ext_map = {'photo': '.jpg', 'video': '.mp4', 'audio': '.mp3', 'voice': '.mp3', 'gif': '.gif', 'sticker': '.webp'}
+        ext = ext_map.get(media_type, '.bin')
+
+    # برای گیف و استیکر طبق مستندات ایتایار پسوند باید به ترتیب .gif و .webp باشد
+    if media_type == 'gif':
+        ext = '.gif'
+    elif media_type == 'sticker':
+        ext = '.webp'
+
+    base_ascii = re.sub(r'[^a-zA-Z0-9_\-]', '', os.path.splitext(orig_title)[0])[:40]
+    if not base_ascii:
+        base_ascii = f"{media_type or 'file'}_{int(time.time())}"
+    upload_name = f"{base_ascii}{ext}"
+
+    mime_type = get_mime_type(upload_name, media_type)
+    if media_type == 'gif':
+        mime_type = 'image/gif'
+    elif media_type == 'sticker':
+        mime_type = 'image/webp'
+
     token = EITAA_TOKEN.strip()
     url = f"https://eitaayar.ir/api/{token}/sendFile"
-    
+
     for attempt in range(1, 4):
         try:
-            print(f" ➤ [تلاش {attempt}] ارسال فایل ({file_name}) به ایتا (@{channel_id})...", flush=True)
+            print(f" ➤ [تلاش {attempt}] ارسال فایل ({upload_name} | {mime_type}) به ایتا (@{channel_id})...", flush=True)
             with open(file_path, 'rb') as f:
-                files = {'file': (file_name, f)}
+                files = {'file': (upload_name, f, mime_type)}
                 data = {
                     'chat_id': channel_id,
                     'caption': caption,
-                    'title': file_name
+                    'title': orig_title or upload_name
                 }
-                res = _bale_eitaa_post(url, files=files, data=data, proxies=DIRECT_PROXY, timeout=120)
-                
+                res = _bale_eitaa_post(url, files=files, data=data, timeout=(30, 600))
+
             if res.status_code == 200:
                 resp_json = res.json()
                 if resp_json.get("ok"):
@@ -1353,17 +1342,17 @@ def process_eitaa_media(caption, channel_id, file_path, file_name, media_type='p
                     print(f"✅ فایل با موفقیت به ایتا (@{channel_id}) ارسال شد.", flush=True)
                     return True, msg_id
                 else:
-                    err_msg = resp_json.get("description", str(resp_json))
+                    err_msg = str(resp_json.get("description", str(resp_json))).replace(token, '***')
                     print(f" ❌ خطای ایتا: {err_msg}", flush=True)
                     if attempt < 3: time.sleep(3)
                     else: return False, err_msg
             else:
-                err_msg = f"HTTP {res.status_code}: {res.text[:120]}"
+                err_msg = f"HTTP {res.status_code}: {res.text[:120]}".replace(token, '***')
                 print(f" ❌ خطای سرور ایتا: {err_msg}", flush=True)
                 if attempt < 3: time.sleep(3)
                 else: return False, err_msg
         except Exception as e:
-            err_msg = f"استثنا در پروسه ایتا: {e}"
+            err_msg = f"استثنا در پروسه ایتا: {str(e).replace(token, '***')}"
             print(f" ❌ خطا: {err_msg}", flush=True)
             if attempt < 3: time.sleep(3)
             else: return False, err_msg
@@ -1448,7 +1437,7 @@ async def run_delayed_sender(q_key, delay_seconds=600):
             if "eitaa" in delayed_platforms:
                 r_eitaa = item.get("r_eitaa", "")
                 e_files = item.get("eitaa_files", [])
-                eitaa_dests = [clean_eitaa_channel(x) for x in r_eitaa.split(',') if clean_eitaa_channel(x)]
+                eitaa_dests = [clean_eitaa_channel(x) for x in re.split(r'[,،\n\s]+', r_eitaa) if clean_eitaa_channel(x)]
                 
                 eitaa_caption = format_text_for_eitaa(caption)
                 is_long_caption = len(eitaa_caption) > 1024
@@ -1468,7 +1457,7 @@ async def run_delayed_sender(q_key, delay_seconds=600):
                                         save_msg_mapping(r_id, cid_clean, getattr(m, 'id', main_msg_id), 'eitaa', e_channel, res, 'media', get_telegram_media_id(m) if hasattr(m, 'id') else "")
                             else:
                                 eitaa_success = False
-                                await notify_admin_all_platforms(f"⚠️ **خطا در ارسال با تاخیر به ایتا**\n\nکانال مبدا: {chat_username}\nمقصد ایتا: {e_channel}\nعلت: {res}\nلینک: {msg_link}")
+                                await notify_admin_all_platforms(f"⚠️ **خطا در ارسال با تاخیر به ایتا**\n\nکانال مبدا: {chat_username}\nمقصد ایتا: {e_channel}\nفایل: {f_obj.get('name', '')} ({f_obj.get('type', '')} | {f_obj.get('size_mb', 0):.2f}MB)\nعلت: {res}\nلینک: {msg_link}")
                             await asyncio.sleep(2)
                             
                         # اگر کپشن بیش از ۱۰۲۴ کاراکتر بود، کل متن بلافاصله پس از فایل‌ها به صورت پیام متنی ارسال می‌شود
@@ -1567,7 +1556,7 @@ def process_rubika_media(caption, channel_id, file_path, file_name, media_type='
                         files={'file': (file_name, file_data, mime_type)}, 
                         headers=headers,
                         proxies=DIRECT_PROXY,
-                        timeout=(15, 120)
+                        timeout=(30, 600)
                     )
                 except Exception as upload_err:
                     last_err = f"خطای شبکه در آپلود: {upload_err}"
@@ -2023,7 +2012,7 @@ async def callback_handler(event):
     is_dest_rubika = not is_dest_all and not is_dest_eitaa and ("روبیکا" in norm_data or "🟣" in clean_data)
     is_dest_bale = not is_dest_all and not is_dest_rubika and not is_dest_eitaa and ("بله" in norm_data or "🟡" in clean_data)
 
-    if (is_dest_bale or is_dest_rubika or is_dest_eitaa or is_dest_all) and not any(x in norm_data for x in ["وضعیت", "ارسال", "مقصد", "حجم", "مطمئنم", "تنظیمات"]):
+    if (is_dest_bale or is_dest_rubika or is_dest_eitaa or is_dest_all) and not any(x in norm_data for x in ["وضعیت", "ارسال", "مقصد", "حجم", "تاخیر", "مطمئنم", "تنظیمات"]):
         fetch_info = admin_states.get(chat_id, {}) if isinstance(admin_states.get(chat_id), dict) else {}
         if not fetch_info:
             fetch_info = admin_states.get(str(chat_id), {}) if isinstance(admin_states.get(str(chat_id)), dict) else {}
@@ -3012,6 +3001,7 @@ async def process_single_or_group(messages, chat_username, chat_id, active_route
 
                     rubika_processed_files = []
                     bale_processed_files = []
+                    eitaa_processed_files = []
 
                     for f_obj in downloaded_files:
                         orig_path = f_obj['original_path']
@@ -3060,6 +3050,30 @@ async def process_single_or_group(messages, chat_username, chat_id, active_route
                                         best_path, best_size = out_path, act_size
 
                         bale_processed_files.append({'path': bale_path, 'name': f_name, 'type': f_type, 'size_mb': bale_size})
+
+                        if orig_size <= eitaa_max_size:
+                            eitaa_path, eitaa_size = orig_path, orig_size
+                        elif rubika_size <= eitaa_max_size:
+                            eitaa_path, eitaa_size = rubika_path, rubika_size
+                        elif bale_size <= eitaa_max_size:
+                            eitaa_path, eitaa_size = bale_path, bale_size
+                        else:
+                            eitaa_path, eitaa_size = best_path, best_size
+                            if is_media:
+                                name_ext = os.path.splitext(f_name)[1].lower()
+                                if f_type == 'video' and name_ext not in ['.mp4', '.mkv', '.mov', '.webm']: name_ext = '.mp4'
+                                elif f_type in ['audio', 'voice'] and not name_ext: name_ext = '.ogg' if f_type == 'voice' else '.mp3'
+
+                                out_path = f"{orig_path}_eitaa_comp{name_ext}"
+                                print(f"🗜 حجم فعلی ({eitaa_size:.2f}MB) بیش از سقف ایتا است. فشرده‌سازی...", flush=True)
+                                if await asyncio.to_thread(compress_media, best_path, out_path, eitaa_max_size, f_type) and os.path.exists(out_path):
+                                    act_size = os.path.getsize(out_path) / (1024 * 1024)
+                                    files_to_cleanup.append(out_path)
+                                    if act_size < best_size:
+                                        eitaa_path, eitaa_size = out_path, act_size
+                                        best_path, best_size = out_path, act_size
+
+                        eitaa_processed_files.append({'path': eitaa_path, 'name': f_name, 'type': f_type, 'size_mb': eitaa_size})
 
                     translated_caption = caption_text
                     if caption_text or downloaded_files:
@@ -3186,8 +3200,8 @@ async def process_single_or_group(messages, chat_username, chat_id, active_route
                     # ۳. بررسی و ارسال به ایتا (همراه با مدیریت محدودیت ۱۰۲۴ کاراکتر کپشن)
                     eitaa_allowed_files = []
                     if target_platform in ['all', 'eitaa'] and eitaa_enabled and r_eitaa.strip():
-                        eitaa_dests = [clean_eitaa_channel(x) for x in r_eitaa.split(',') if clean_eitaa_channel(x)]
-                        eitaa_allowed_files = [f for f in rubika_processed_files if f['size_mb'] <= eitaa_max_size]
+                        eitaa_dests = [clean_eitaa_channel(x) for x in re.split(r'[,،\n\s]+', r_eitaa) if clean_eitaa_channel(x)]
+                        eitaa_allowed_files = [f for f in eitaa_processed_files if f['size_mb'] <= eitaa_max_size]
                         
                         eitaa_caption = format_text_for_eitaa(translated_caption)
                         is_long_caption = len(eitaa_caption) > 1024
@@ -3205,7 +3219,7 @@ async def process_single_or_group(messages, chat_username, chat_id, active_route
                                             for m in messages:
                                                 save_msg_mapping(r_id, cid_clean, getattr(m, 'id', main_msg_id), 'eitaa', e_channel, e_res, 'media', get_telegram_media_id(m) if hasattr(m, 'id') else "")
                                         elif not e_success:
-                                            await notify_admin_all_platforms(f"⚠️ **خطا در ارسال به ایتا**\n\nکانال مبدا: {chat_username}\nمقصد ایتا: {e_channel}\nعلت: {e_res}\nلینک: {msg_link}")
+                                            await notify_admin_all_platforms(f"⚠️ **خطا در ارسال به ایتا**\n\nکانال مبدا: {chat_username}\nمقصد ایتا: {e_channel}\nفایل: {file_obj.get('name', '')} ({file_obj.get('type', '')} | {file_obj.get('size_mb', 0):.2f}MB)\nعلت: {e_res}\nلینک: {msg_link}")
                                             route_all_succeeded = False
                                         await asyncio.sleep(2)
                                         
@@ -3685,14 +3699,6 @@ async def rubika_admin_poller():
 def _dispatch_next_run():
     # Self-dispatch disabled: runs are started externally on a fixed schedule.
     return
-    try:
-        from datetime import datetime, timezone, timedelta
-        _tn = datetime.now(timezone(timedelta(hours=3, minutes=30)))
-        if _tn.hour >= 18 or _tn.hour < 6:
-            print("Night window (06:00-24:00 Tehran work hours); next run not dispatched.", flush=True)
-            return
-    except Exception:
-        pass
     token = os.environ.get("GITHUB_TOKEN")
     repo = os.environ.get("GITHUB_REPOSITORY")
     run_id = os.environ.get("GITHUB_RUN_ID")
