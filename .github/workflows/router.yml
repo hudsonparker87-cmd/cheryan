@@ -1,0 +1,41 @@
+name: Router Bot
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '30 2 * * *'
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: router-bot
+  cancel-in-progress: true
+
+jobs:
+  run-router-bot:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - name: Install packages
+        run: pip install telethon psycopg2-binary requests aiohttp
+      - name: Run bot
+        env:
+          TELEGRAM_API_ID: ${{ secrets.TELEGRAM_API_ID }}
+          TELEGRAM_API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
+          SESSION_STRING: ${{ secrets.SESSION_STRING }}
+          CONTROL_BOT_TOKEN: ${{ secrets.CONTROL_BOT_TOKEN }}
+          ADMIN_ID: ${{ secrets.ADMIN_ID }}
+          BALE_TOKEN_ROUTER: ${{ secrets.BALE_TOKEN_ROUTER }}
+          RUBIKA_TOKEN: ${{ secrets.RUBIKA_TOKEN }}
+          EITAA_TOKEN: ${{ secrets.EITAA_TOKEN }}
+          GEMINI_API_KEY_ROUTER: ${{ secrets.GEMINI_API_KEY_ROUTER }}
+          ROUTER_DATABASE_URL: ${{ secrets.ROUTER_DATABASE_URL }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: exec python telegram_router.py
