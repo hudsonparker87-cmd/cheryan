@@ -682,10 +682,10 @@ async def process_with_ai(text, custom_prompt, smart_filter, media_paths=None, a
 
 async def notify_admin(post_link, platform, reason):
     try:
-        admins = get_all_admins()
-        if admins:
-            await bot_app.send_message(int(admins[0]), f"⚠️ **خطا در انتقال پست**\n\nلینک پست اصلی: {post_link or 'نامشخص'}\nمقصد: {platform}\nعلت:\n`{reason}`")
-    except: pass
+        msg = f"⚠️ **خطا در انتقال پست**\n\nلینک پست اصلی: {post_link or 'نامشخص'}\nمقصد: {platform}\nعلت:\n`{reason}`"
+        await notify_admin_all_platforms(msg)
+    except Exception as e:
+        print(f"⚠️ خطا در ارسال اخطار به ادمین: {e}", flush=True)
 
 def format_channel_id(c_id):
     c_id = c_id.strip()
@@ -1233,9 +1233,17 @@ async def notify_admin_all_platforms(text):
 
     # ۲. بله
     try:
-        bale_admin = os.environ.get("BALE_ADMIN_ID", "").strip()
-        if BALE_TOKEN and bale_admin and bale_admin.lstrip('-').isdigit():
-            await asyncio.to_thread(send_to_platform, "bale", int(bale_admin), text, None)
+        if BALE_TOKEN:
+            raw_bale_admins = os.environ.get("BALE_ADMIN_ID", "").strip()
+            if raw_bale_admins:
+                bale_targets = [x.strip() for x in re.split(r'[,،\s]+', raw_bale_admins) if x.strip() and x.strip().lstrip('-').isdigit()]
+            else:
+                bale_targets = [str(a).strip() for a in get_all_admins() if a and str(a).strip().lstrip('-').isdigit()]
+            for b_adm in dict.fromkeys(bale_targets):
+                try:
+                    await asyncio.to_thread(send_to_platform, "bale", int(b_adm), text, None)
+                except Exception as e_b:
+                    print(f"⚠️ خطا در ارسال اخطار به ادمین بله ({b_adm}): {e_b}", flush=True)
     except Exception as e:
         print(f"⚠️ خطا در ارسال اخطار به ادمین در بله: {e}", flush=True)
 
@@ -1514,11 +1522,8 @@ def process_rubika_media(caption, channel_id, file_path, file_name, media_type='
     if original_file_type != "File":
         types_to_try.append("File")
         
-    try:
-        with open(file_path, 'rb') as f:
-            file_data = f.read()
-    except Exception as e:
-        return False, f"خطا در خواندن فایل از دیسک: {e}"
+    if not file_path or not os.path.exists(file_path):
+        return False, "فایل مورد نظر روی دیسک یافت نشد"
 
     last_err = ""
     for current_type in types_to_try:
@@ -1551,13 +1556,15 @@ def process_rubika_media(caption, channel_id, file_path, file_name, media_type='
                     
                 print(f" ➤ [تلاش {attempt}] آپلود در سرور روبیکا (حجم: {file_bytes_size/(1024*1024):.2f}MB)...", flush=True)
                 try:
-                    up_res_raw = _rubika_post(
-                        upload_url,
-                        files={'file': (file_name, file_data, mime_type)}, 
-                        headers=headers,
-                        proxies=DIRECT_PROXY,
-                        timeout=(30, 600)
-                    )
+                    upload_headers = {**headers, "Connection": "close"}
+                    with open(file_path, 'rb') as f_up:
+                        up_res_raw = _rubika_post(
+                            upload_url,
+                            files={'file': (file_name, f_up, mime_type)},
+                            headers=upload_headers,
+                            proxies=DIRECT_PROXY,
+                            timeout=(30, 600)
+                        )
                 except Exception as upload_err:
                     last_err = f"خطای شبکه در آپلود: {upload_err}"
                     print(f" ❌ خطا: {last_err}", flush=True)
@@ -3249,10 +3256,15 @@ async def process_single_or_group(messages, chat_username, chat_id, active_route
                         pending_dir = f"downloads/delayed_pending/{r_id}_{cid_clean}_{main_msg_id}"
                         os.makedirs(pending_dir, exist_ok=True)
                         
+                        def _safe_pending_name(prefix, idx, raw_name):
+                            base = os.path.basename(str(raw_name or f"file_{idx}"))
+                            clean = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', '_', base).strip() or f"file_{idx}"
+                            return f"{prefix}_{idx}_{clean}"
+
                         preserved_rubika_files = []
                         if "rubika" in delayed_platforms and rubika_allowed_files:
-                            for f_obj in rubika_allowed_files:
-                                safe_dest = os.path.join(pending_dir, f"r_{f_obj['name']}")
+                            for f_idx, f_obj in enumerate(rubika_allowed_files):
+                                safe_dest = os.path.join(pending_dir, _safe_pending_name("r", f_idx, f_obj['name']))
                                 try:
                                     shutil.copy2(f_obj['path'], safe_dest)
                                     preserved_rubika_files.append({
@@ -3266,8 +3278,8 @@ async def process_single_or_group(messages, chat_username, chat_id, active_route
 
                         preserved_bale_files = []
                         if "bale" in delayed_platforms and bale_allowed_files:
-                            for f_obj in bale_allowed_files:
-                                safe_dest = os.path.join(pending_dir, f"b_{f_obj['name']}")
+                            for f_idx, f_obj in enumerate(bale_allowed_files):
+                                safe_dest = os.path.join(pending_dir, _safe_pending_name("b", f_idx, f_obj['name']))
                                 try:
                                     shutil.copy2(f_obj['path'], safe_dest)
                                     preserved_bale_files.append({
@@ -3281,8 +3293,8 @@ async def process_single_or_group(messages, chat_username, chat_id, active_route
 
                         preserved_eitaa_files = []
                         if "eitaa" in delayed_platforms and eitaa_allowed_files:
-                            for f_obj in eitaa_allowed_files:
-                                safe_dest = os.path.join(pending_dir, f"e_{f_obj['name']}")
+                            for f_idx, f_obj in enumerate(eitaa_allowed_files):
+                                safe_dest = os.path.join(pending_dir, _safe_pending_name("e", f_idx, f_obj['name']))
                                 try:
                                     shutil.copy2(f_obj['path'], safe_dest)
                                     preserved_eitaa_files.append({
