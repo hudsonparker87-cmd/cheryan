@@ -631,7 +631,8 @@ async def process_with_ai(text, custom_prompt, smart_filter, media_paths=None, a
         
         payload = {
             "system_instruction": {"parts": [{"text": sys_msg}]},
-            "contents": [{"role": "user", "parts": parts}]
+            "contents": [{"role": "user", "parts": parts}],
+            "generationConfig": {"maxOutputTokens": 8192}
         }
 
         async with aiohttp.ClientSession() as session:
@@ -639,7 +640,7 @@ async def process_with_ai(text, custom_prompt, smart_filter, media_paths=None, a
                 url = f"https://generativelanguage.googleapis.com/v1beta/models/{m}:generateContent?key={GEMINI_API_KEY}"
                 for attempt in range(3):
                     try:
-                        async with session.post(url, json=payload, timeout=45) as res:
+                        async with session.post(url, json=payload, timeout=60) as res:
                             if res.status == 200:
                                 data = await res.json()
                                 candidates = data.get('candidates', [])
@@ -647,13 +648,36 @@ async def process_with_ai(text, custom_prompt, smart_filter, media_paths=None, a
                                     # اینجا فیلتر را برنمی‌گردانیم چون ممکن است پاسخ خالی به خاطر ارور باشد
                                     return text or ""
                                 
-                                content_parts = candidates[0].get('content', {}).get('parts', [])
-                                if not content_parts: return text or ""
-                                    
-                                result_text = content_parts[0].get('text', '').strip()
-                                if "FILTERED" in result_text.upper():
+                                cand = candidates[0]
+                                finish_reason = str(cand.get('finishReason') or 'STOP').upper()
+                                content_parts = cand.get('content', {}).get('parts', [])
+                                if not content_parts:
+                                    print(f"⚠️ پاسخ خالی از {m} (finishReason={finish_reason})؛ تلاش مجدد...", flush=True)
+                                    await asyncio.sleep(2)
+                                    continue
+
+                                text_chunks = [
+                                    p.get('text', '') for p in content_parts
+                                    if isinstance(p, dict) and not p.get('thought') and p.get('text')
+                                ]
+                                result_text = "".join(text_chunks).strip()
+
+                                # تشخیص دقیق فیلتر هوشمند (شامل FILTER و FILTERED)
+                                cleaned_flag = re.sub(r'[^A-Z]', '', result_text.upper())
+                                if "FILTERED" in result_text.upper() or cleaned_flag in ("FILTER", "FILTERED"):
                                     return "FILTERED"
-                                    
+
+                                # جلوگیری از انتشار کپشن ناقص/بریده‌شده
+                                if finish_reason not in ("STOP", ""):
+                                    print(f"⚠️ پاسخ {m} ناتمام بود (finishReason={finish_reason})؛ تلاش مجدد...", flush=True)
+                                    await asyncio.sleep(2)
+                                    continue
+
+                                if not result_text:
+                                    print(f"⚠️ متن خروجی {m} خالی بود؛ تلاش مجدد...", flush=True)
+                                    await asyncio.sleep(2)
+                                    continue
+
                                 return result_text
                                 
                             elif res.status == 429:
@@ -818,7 +842,7 @@ def send_single_media_to_bale(caption, channel_id, file_path, file_name, media_t
             # فایل درون حلقه باز می‌شود تا در صورت خطا، مجدداً از ابتدا خوانده شود
             with open(file_path, 'rb') as f:
                 files = {file_key: (file_name, f, mime_type)}
-                res = _bale_eitaa_post(url, data={'chat_id': channel_id, 'caption': caption}, files=files, proxies=DIRECT_PROXY, timeout=(30, 600))
+                res = _bale_eitaa_post(url, data={'chat_id': channel_id, 'caption': caption}, files=files, proxies=DIRECT_PROXY, timeout=600)
                 
                 if res.status_code == 200:
                     print(f"✅ تک‌فایل با موفقیت به بله ({channel_id}) ارسال شد.", flush=True)
@@ -873,7 +897,7 @@ def send_album_to_bale(caption, channel_id, files_list):
                 # برگرداندن نشانگرِ خواندن تمام فایل‌ها به نقطه صفر پیش از هر تلاش
                 for f in opened_files: f.seek(0)
                 
-                res = _bale_eitaa_post(f"https://tapi.bale.ai/bot{BALE_TOKEN}/sendMediaGroup", data={"chat_id": channel_id, "media": json.dumps(media_json)}, files=files_dict, proxies=DIRECT_PROXY, timeout=(30, 600))
+                res = _bale_eitaa_post(f"https://tapi.bale.ai/bot{BALE_TOKEN}/sendMediaGroup", data={"chat_id": channel_id, "media": json.dumps(media_json)}, files=files_dict, proxies=DIRECT_PROXY, timeout=600)
                 
                 if res.status_code == 200:
                     print(f"✅ آلبوم با موفقیت به بله ({channel_id}) ارسال شد.", flush=True)
@@ -1341,7 +1365,7 @@ def process_eitaa_media(caption, channel_id, file_path, file_name, media_type='p
                     'caption': caption,
                     'title': orig_title or upload_name
                 }
-                res = _bale_eitaa_post(url, files=files, data=data, timeout=(30, 600))
+                res = _bale_eitaa_post(url, files=files, data=data, timeout=600)
 
             if res.status_code == 200:
                 resp_json = res.json()
@@ -1563,7 +1587,7 @@ def process_rubika_media(caption, channel_id, file_path, file_name, media_type='
                             files={'file': (file_name, f_up, mime_type)},
                             headers=upload_headers,
                             proxies=DIRECT_PROXY,
-                            timeout=(30, 600)
+                            timeout=600
                         )
                 except Exception as upload_err:
                     last_err = f"خطای شبکه در آپلود: {upload_err}"
@@ -1697,8 +1721,7 @@ user_app = TelegramClient(
 user_app.parse_mode = 'md'
 # کلاینت ربات مدیریت
 bot_app = TelegramClient("admin_bot", TELEGRAM_API_ID, TELEGRAM_API_HASH)
-# پین‌کردن اتصال ربات روی دیتاسنتر ۴ (هم‌مسیر با سشن کاربر) — آزمایش ۲۰۲۶-۱۱-۲۴
-bot_app.session.set_dc(4, "149.154.167.91", 443)
+bot_app.session.set_dc(4, "149.154.167.91", 443)  # پین به دیتاسنتر ۴ تلگرام (همان دیتاسنتر نشست کاربر)
 bot_app.parse_mode = 'md'
 
 admin_states = {}
@@ -3709,8 +3732,7 @@ async def rubika_admin_poller():
 # اول چک می‌کند اجرای دیگری در صف یا در حال اجرا نباشد تا اجرای تکراری
 # ساخته نشود — مثلاً وقتی لغو به‌خاطر cron بوده و اجرای بعدی از قبل هست.
 def _dispatch_next_run():
-    # Self-dispatch disabled: runs are started externally on a fixed schedule.
-    return
+    return  # دیسپچ خودکار غیرفعال است؛ Muse هر ۶ ساعت دیسپچ می‌کند
     token = os.environ.get("GITHUB_TOKEN")
     repo = os.environ.get("GITHUB_REPOSITORY")
     run_id = os.environ.get("GITHUB_RUN_ID")
