@@ -195,25 +195,29 @@ def load_all_msg_mappings():
     global _MSG_MAP_CACHE, _MSG_MAP_LOADED
     if _MSG_MAP_LOADED or not DATABASE_URL:
         return
-    try:
-        conn = psycopg2.connect(DATABASE_URL)
-        cursor = conn.cursor()
-        cursor.execute('''
-            SELECT route_id, tg_chat_id, tg_msg_id, platform, dest_chat_id, dest_msg_id, msg_type, COALESCE(media_id, '')
-            FROM router_msg_map
-        ''')
-        rows = cursor.fetchall()
-        cursor.close()
-        conn.close()
-        with _MSG_MAP_LOCK:
-            for r_id, cid, mid, plat, d_cid, d_mid, m_type, med_id in rows:
-                key = (int(r_id), std_id(cid), int(mid))
-                if key not in _MSG_MAP_CACHE:
-                    _MSG_MAP_CACHE[key] = {}
-                _MSG_MAP_CACHE[key][(str(plat), str(d_cid))] = (str(d_mid), str(m_type), str(med_id))
-            _MSG_MAP_LOADED = True
-    except Exception as e:
-        print(f"⚠️ خطا در بارگذاری اولیه نگاشت پیام‌ها در رم: {e}", flush=True)
+    for attempt in range(1, 6):
+        try:
+            conn = psycopg2.connect(DATABASE_URL, connect_timeout=15)
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT route_id, tg_chat_id, tg_msg_id, platform, dest_chat_id, dest_msg_id, msg_type, COALESCE(media_id, '')
+                FROM router_msg_map
+            ''')
+            rows = cursor.fetchall()
+            cursor.close()
+            conn.close()
+            with _MSG_MAP_LOCK:
+                for r_id, cid, mid, plat, d_cid, d_mid, m_type, med_id in rows:
+                    key = (int(r_id), std_id(cid), int(mid))
+                    if key not in _MSG_MAP_CACHE:
+                        _MSG_MAP_CACHE[key] = {}
+                    _MSG_MAP_CACHE[key][(str(plat), str(d_cid))] = (str(d_mid), str(m_type), str(med_id))
+                _MSG_MAP_LOADED = True
+            return
+        except Exception as e:
+            print(f"⚠️ خطا در بارگذاری اولیه نگاشت پیام‌ها در رم (تلاش {attempt}/5): {e}", flush=True)
+            if attempt < 5:
+                time.sleep(3)
 
 def save_msg_mapping(route_id, tg_chat_id, tg_msg_id, platform, dest_chat_id, dest_msg_id, msg_type, media_id=""):
     global _MSG_MAP_CACHE, _MSG_MAP_DIRTY
@@ -347,17 +351,21 @@ def update_route_field(route_id, field_column, value):
 # ----------------- توابع وضعیت پیام‌ها (ایزوله شده بر اساس مسیر) -----------------
 def load_all_states():
     global _STATE_CACHE
-    try:
-        conn = psycopg2.connect(DATABASE_URL)
-        cursor = conn.cursor()
-        cursor.execute("SELECT channel_id, last_msg_id FROM router_channel_state")
-        rows = cursor.fetchall()
-        conn.close()
-        for r in rows:
-            # در سیستم جدید، channel_id در واقع رشته ترکیبی r{route_id}_c{channel_id} است
-            _STATE_CACHE[str(r[0])] = r[1]
-    except Exception:
-        pass
+    for attempt in range(1, 6):
+        try:
+            conn = psycopg2.connect(DATABASE_URL, connect_timeout=15)
+            cursor = conn.cursor()
+            cursor.execute("SELECT channel_id, last_msg_id FROM router_channel_state")
+            rows = cursor.fetchall()
+            conn.close()
+            for r in rows:
+                # در سیستم جدید، channel_id در واقع رشته ترکیبی r{route_id}_c{channel_id} است
+                _STATE_CACHE[str(r[0])] = r[1]
+            return
+        except Exception as e:
+            print(f"⚠️ خطا در بارگذاری اولیه وضعیت کانال‌ها از دیتابیس (تلاش {attempt}/5): {e}", flush=True)
+            if attempt < 5:
+                time.sleep(3)
 
 # --- یکسان‌سازی آیدی‌های تلگرام برای رفع مشکل دوگانگی ---
 def std_id(cid):
@@ -404,51 +412,56 @@ def flush_all_to_db():
     if not _STATE_CHANGED and not _ADMINS_CHANGED and not _ROUTES_CHANGED and not has_msg_map_changes:
         return
 
-    try:
-        conn = psycopg2.connect(DATABASE_URL)
-        cursor = conn.cursor()
-        
-        if _STATE_CHANGED:
-            for cid, mid in _STATE_CACHE.items():
-                cursor.execute('''
-                INSERT INTO router_channel_state (channel_id, last_msg_id) 
-                VALUES (%s, %s) ON CONFLICT (channel_id) DO UPDATE SET last_msg_id = EXCLUDED.last_msg_id
-                ''', (str(cid), mid))
+    for attempt in range(1, 6):
+        try:
+            conn = psycopg2.connect(DATABASE_URL, connect_timeout=15)
+            cursor = conn.cursor()
+            
+            if _STATE_CHANGED:
+                for cid, mid in _STATE_CACHE.items():
+                    cursor.execute('''
+                    INSERT INTO router_channel_state (channel_id, last_msg_id) 
+                    VALUES (%s, %s) ON CONFLICT (channel_id) DO UPDATE SET last_msg_id = GREATEST(router_channel_state.last_msg_id, EXCLUDED.last_msg_id)
+                    ''', (str(cid), mid))
+                
+            if _ADMINS_CHANGED:
+                cursor.execute("DELETE FROM router_admins")
+                for admin_id in _ADMINS_CACHE:
+                    cursor.execute("INSERT INTO router_admins (admin_id) VALUES (%s)", (str(admin_id),))
+                
+            if _ROUTES_CHANGED:
+                cursor.execute("DELETE FROM router_routes")
+                for r in _ROUTES_CACHE:
+                    cursor.execute('''
+                    INSERT INTO router_routes 
+                    (id, name, src_channels, bale_channels, rubika_channels, custom_prompt, blacklist, use_ai_media, bale_max_size, rubika_max_size, ai_enabled, ai_add_hashtags, ai_translation, bale_enabled, rubika_enabled, allow_no_caption, eitaa_channels, eitaa_max_size, eitaa_enabled, bale_delay, rubika_delay, eitaa_delay) 
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ''', (r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7], r[8], r[9], r[10], r[11], r[12], r[13], r[14], (r[15] if len(r)>15 else True), (r[16] if len(r)>16 else ''), (r[17] if len(r)>17 else 50), (r[18] if len(r)>18 else True), (r[19] if len(r)>19 else False), (r[20] if len(r)>20 else False), (r[21] if len(r)>21 else True)))
+
+            if dirty_items:
+                for (r_id, clean_cid, m_id, plat, d_cid), (d_mid, m_type, med_id) in dirty_items:
+                    cursor.execute('''
+                        INSERT INTO router_msg_map (route_id, tg_chat_id, tg_msg_id, platform, dest_chat_id, dest_msg_id, msg_type, media_id)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (route_id, tg_chat_id, tg_msg_id, platform, dest_chat_id)
+                        DO UPDATE SET dest_msg_id = EXCLUDED.dest_msg_id, msg_type = EXCLUDED.msg_type, media_id = EXCLUDED.media_id, created_at = CURRENT_TIMESTAMP
+                    ''', (r_id, clean_cid, m_id, plat, d_cid, d_mid, m_type, med_id))
+
+            conn.commit()
+            conn.close()
             _STATE_CHANGED = False
-            
-        if _ADMINS_CHANGED:
-            cursor.execute("DELETE FROM router_admins")
-            for admin_id in _ADMINS_CACHE:
-                cursor.execute("INSERT INTO router_admins (admin_id) VALUES (%s)", (str(admin_id),))
             _ADMINS_CHANGED = False
-            
-        if _ROUTES_CHANGED:
-            cursor.execute("DELETE FROM router_routes")
-            for r in _ROUTES_CACHE:
-                cursor.execute('''
-                INSERT INTO router_routes 
-                (id, name, src_channels, bale_channels, rubika_channels, custom_prompt, blacklist, use_ai_media, bale_max_size, rubika_max_size, ai_enabled, ai_add_hashtags, ai_translation, bale_enabled, rubika_enabled, allow_no_caption, eitaa_channels, eitaa_max_size, eitaa_enabled, bale_delay, rubika_delay, eitaa_delay) 
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                ''', (r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7], r[8], r[9], r[10], r[11], r[12], r[13], r[14], (r[15] if len(r)>15 else True), (r[16] if len(r)>16 else ''), (r[17] if len(r)>17 else 50), (r[18] if len(r)>18 else True), (r[19] if len(r)>19 else False), (r[20] if len(r)>20 else False), (r[21] if len(r)>21 else True)))
             _ROUTES_CHANGED = False
-
-        if dirty_items:
-            for (r_id, clean_cid, m_id, plat, d_cid), (d_mid, m_type, med_id) in dirty_items:
-                cursor.execute('''
-                    INSERT INTO router_msg_map (route_id, tg_chat_id, tg_msg_id, platform, dest_chat_id, dest_msg_id, msg_type, media_id)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                    ON CONFLICT (route_id, tg_chat_id, tg_msg_id, platform, dest_chat_id)
-                    DO UPDATE SET dest_msg_id = EXCLUDED.dest_msg_id, msg_type = EXCLUDED.msg_type, media_id = EXCLUDED.media_id, created_at = CURRENT_TIMESTAMP
-                ''', (r_id, clean_cid, m_id, plat, d_cid, d_mid, m_type, med_id))
-            with _MSG_MAP_LOCK:
-                for k, _ in dirty_items:
-                    _MSG_MAP_DIRTY.pop(k, None)
-
-        conn.commit()
-        conn.close()
-        print("✅ تمامی اطلاعات رم (پیام‌ها، نگاشت‌ها، ادمین‌ها و مسیرها) با موفقیت در دیتابیس ذخیره شد.", flush=True)
-    except Exception as e:
-        print(f"❌ خطای همگام‌سازی دیتابیس در زمان خروج: {e}", flush=True)
+            if dirty_items:
+                with _MSG_MAP_LOCK:
+                    for k, _ in dirty_items:
+                        _MSG_MAP_DIRTY.pop(k, None)
+            print("✅ تمامی اطلاعات رم (پیام‌ها، نگاشت‌ها، ادمین‌ها و مسیرها) با موفقیت در دیتابیس ذخیره شد.", flush=True)
+            return
+        except Exception as e:
+            print(f"❌ خطای همگام‌سازی دیتابیس در زمان خروج (تلاش {attempt}/5): {e}", flush=True)
+            if attempt < 5:
+                time.sleep(3)
 
 atexit.register(flush_all_to_db)
 
@@ -3159,10 +3172,18 @@ async def process_single_or_group(messages, chat_username, chat_id, active_route
                     eitaa_delay = route[21] if len(route) > 21 else True
                     delayed_platforms = []
 
+                    already_sent_dests = set()
+                    if not bypass_id_check:
+                        existing_route_maps = await asyncio.to_thread(get_msg_mappings, r_id, cid_clean, main_msg_id)
+                        already_sent_dests = {(str(plat), str(d_cid)) for plat, d_cid, _, _, _ in existing_route_maps}
+
                     # ۱. بررسی و ارسال به روبیکا
                     rubika_allowed_files = []
+                    rubika_dests = []
                     if target_platform in ['all', 'rubika'] and rubika_enabled and r_rubika.strip():
                         rubika_dests = [format_channel_id(x) for x in r_rubika.split(',') if x.strip()]
+                        if already_sent_dests:
+                            rubika_dests = [c for c in rubika_dests if ('rubika', str(c)) not in already_sent_dests]
                         rubika_allowed_files = [f for f in rubika_processed_files if f['size_mb'] <= rubika_max_size]
 
                         if not rubika_delay or bypass_id_check:
@@ -3190,13 +3211,16 @@ async def process_single_or_group(messages, chat_username, chat_id, active_route
                                         await notify_admin(msg_link, f"روبیکا ({r_channel})", f"خطا:\n{rubika_res}")
                                         route_all_succeeded = False
                                     await asyncio.sleep(2)
-                        else:
+                        elif rubika_dests:
                             delayed_platforms.append('rubika')
 
                     # ۲. بررسی و ارسال به بله
                     bale_allowed_files = []
+                    bale_dests = []
                     if target_platform in ['all', 'bale'] and bale_enabled and r_bale.strip():
                         bale_dests = [format_channel_id(x) for x in r_bale.split(',') if x.strip()]
+                        if already_sent_dests:
+                            bale_dests = [c for c in bale_dests if ('bale', str(c)) not in already_sent_dests]
                         bale_allowed_files = [f for f in bale_processed_files if f['size_mb'] <= bale_max_size]
                         
                         if not bale_delay or bypass_id_check:
@@ -3224,13 +3248,16 @@ async def process_single_or_group(messages, chat_username, chat_id, active_route
                                     await notify_admin(msg_link, f"بله ({b_channel})", f"خطا:\n{bale_res}")
                                     route_all_succeeded = False
                                 await asyncio.sleep(3)
-                        else:
+                        elif bale_dests:
                             delayed_platforms.append('bale')
 
                     # ۳. بررسی و ارسال به ایتا (همراه با مدیریت محدودیت ۱۰۲۴ کاراکتر کپشن)
                     eitaa_allowed_files = []
+                    eitaa_dests = []
                     if target_platform in ['all', 'eitaa'] and eitaa_enabled and r_eitaa.strip():
                         eitaa_dests = [clean_eitaa_channel(x) for x in re.split(r'[,،\n\s]+', r_eitaa) if clean_eitaa_channel(x)]
+                        if already_sent_dests:
+                            eitaa_dests = [c for c in eitaa_dests if ('eitaa', str(c)) not in already_sent_dests]
                         eitaa_allowed_files = [f for f in eitaa_processed_files if f['size_mb'] <= eitaa_max_size]
                         
                         eitaa_caption = format_text_for_eitaa(translated_caption)
@@ -3271,7 +3298,7 @@ async def process_single_or_group(messages, chat_username, chat_id, active_route
                                         await notify_admin_all_platforms(f"⚠️ **خطا در ارسال به ایتا**\n\nکانال مبدا: {chat_username}\nمقصد ایتا: {e_channel}\nعلت: {e_res}\nلینک: {msg_link}")
                                         route_all_succeeded = False
                                     await asyncio.sleep(2)
-                        else:
+                        elif eitaa_dests:
                             delayed_platforms.append('eitaa')
 
                     # ۴. نگهداری و زمان‌بندی پیام در صف تاخیر ۱۰ دقیقه‌ای در صورت وجود مقاصد با تاخیر
@@ -3346,16 +3373,19 @@ async def process_single_or_group(messages, chat_username, chat_id, active_route
                             "msg_link": msg_link,
                             "messages": messages,
                             "platforms": delayed_platforms,
-                            "r_rubika": r_rubika,
+                            "r_rubika": ",".join(rubika_dests),
                             "rubika_files": preserved_rubika_files,
-                            "r_bale": r_bale,
+                            "r_bale": ",".join(bale_dests),
                             "bale_files": preserved_bale_files,
-                            "r_eitaa": r_eitaa,
+                            "r_eitaa": ",".join(eitaa_dests),
                             "eitaa_files": preserved_eitaa_files,
                             "expire_at": time.time() + 600
                         }
                         plat_names = "، ".join({"rubika": "روبیکا", "bale": "بله", "eitaa": "ایتا"}.get(p, p) for p in delayed_platforms)
                         print(f"⏳ پیام {main_msg_id} برای ارسال به ({plat_names}) با تاخیر ۱۰ دقیقه‌ای در صف قرار گرفت.", flush=True)
+
+                    if route_all_succeeded:
+                        successful_routes.append(route)
                 for path in set(files_to_cleanup):
                     if os.path.exists(path):
                         try: os.remove(path)
